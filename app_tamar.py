@@ -198,8 +198,10 @@ df_hist = pd.DataFrame(historico)
 st.subheader("📈 Evolución Histórica: BE vs Mercado")
 fig, ax = plt.subplots(figsize=(10, 4.2))
 if not df_hist.empty:
-    ax.plot(df_hist['fecha'], df_hist['tamar_be'] * 100, label=f'TAMAR BE ({lecap_elegida} vs {letam_elegida})', color='#d62728', marker='o', linewidth=2)
-    ax.plot(df_hist['fecha'], df_hist['tamar_mercado'] * 100, label='TAMAR Mkt Real', color='#1f77b4', linestyle='--', marker='s', linewidth=2)
+    # ❌ Borramos marker='o' y marker='s' de ambas líneas
+    ax.plot(df_hist['fecha'], df_hist['tamar_be'] * 100, label=f'TAMAR BE ({lecap_elegida} vs {letam_elegida})', color='#d62728', linewidth=2.5)
+    ax.plot(df_hist['fecha'], df_hist['tamar_mercado'] * 100, label='TAMAR Mkt Real', color='#1f77b4', linestyle='--', linewidth=2.5)
+    
     ax.set_ylabel('TNA (%)')
     ax.grid(True, linestyle=':', alpha=0.6)
     ax.legend()
