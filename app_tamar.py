@@ -1,9 +1,9 @@
 import os
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from datetime import datetime, date, timedelta
 import streamlit as st
+import plotly.graph_objects as go
 
 # Configuración de la página
 st.set_page_config(page_title="Dashboard TAMAR BE", layout="wide")
@@ -194,18 +194,49 @@ for _, row in df_precios_filtrado.iterrows():
 
 df_hist = pd.DataFrame(historico)
 
-# Gráfico Histórico
+# Gráfico Histórico Interactivo
 st.subheader("📈 Evolución Histórica: BE vs Mercado")
-fig, ax = plt.subplots(figsize=(10, 4.2))
+
 if not df_hist.empty:
-    # ❌ Borramos marker='o' y marker='s' de ambas líneas
-    ax.plot(df_hist['fecha'], df_hist['tamar_be'] * 100, label=f'TAMAR BE ({lecap_elegida} vs {letam_elegida})', color='#d62728', linewidth=2.5)
-    ax.plot(df_hist['fecha'], df_hist['tamar_mercado'] * 100, label='TAMAR Mkt Real', color='#1f77b4', linestyle='--', linewidth=2.5)
-    
-    ax.set_ylabel('TNA (%)')
-    ax.grid(True, linestyle=':', alpha=0.6)
-    ax.legend()
-    plt.xticks(rotation=45)
-    st.pyplot(fig)
+    df_hist_plot = df_hist.copy()
+    df_hist_plot['be_pct'] = df_hist_plot['tamar_be'] * 100
+    df_hist_plot['mkt_pct'] = df_hist_plot['tamar_mercado'] * 100
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=df_hist_plot['fecha'],
+        y=df_hist_plot['be_pct'],
+        mode='lines',
+        name=f'TAMAR BE ({lecap_elegida} vs {letam_elegida})',
+        line=dict(color='#d62728', width=2.5),
+        hovertemplate='<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>TAMAR BE:</b> %{y:.2f}%<extra></extra>'
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=df_hist_plot['fecha'],
+        y=df_hist_plot['mkt_pct'],
+        mode='lines',
+        name='TAMAR Mkt Real',
+        line=dict(color='#1f77b4', width=2.5, dash='dash'),
+        hovertemplate='<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>TAMAR Mkt Real:</b> %{y:.2f}%<extra></extra>'
+    ))
+
+    fig.update_layout(
+        hovermode='x unified',
+        yaxis_title='TNA (%)',
+        template='plotly_white',
+        height=450,
+        margin=dict(l=10, r=10, t=30, b=10),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
 else:
     st.warning("No hay datos en el rango de fechas seleccionado.")
