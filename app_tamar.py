@@ -47,6 +47,24 @@ def proximo_habil(f, feriados):
         actual += timedelta(days=1)
     return actual
 
+def restar_dias_habiles(f, dias, feriados):
+    actual = f
+    restados = 0
+    while restados < dias:
+        actual -= timedelta(days=1)
+        if es_habil(actual, feriados):
+            restados += 1
+    return actual
+
+def contar_dias_habiles(f_inicio, f_fin, feriados):
+    actual = f_inicio
+    dias = 0
+    while actual < f_fin:
+        actual += timedelta(days=1)
+        if es_habil(actual, feriados):
+            dias += 1
+    return dias
+
 def calcular_fecha_liq(f_op, plazo_t, feriados):
     actual = f_op
     sumados = 0
@@ -71,6 +89,7 @@ def calcular_tamar_be(ticker_lec, ticker_let, p_lec, p_let, f_op, df_lec, df_let
     row_let = df_let[df_let['Ticker'] == ticker_let].iloc[0]
     f_liq = calcular_fecha_liq(f_op, plazo_t, feriados)
     
+    # --- LECAP ---
     f_vto_lec = pd.to_datetime(row_lec['Vencimiento']).date()
     f_em_lec = pd.to_datetime(row_lec['Emisión']).date()
     tem_lec = row_lec['Tasa']
@@ -88,6 +107,7 @@ def calcular_tamar_be(ticker_lec, ticker_let, p_lec, p_let, f_op, df_lec, df_let
     tir_lec = ((1 + rend_lec) ** (365 / dias_cartera_lec)) - 1
     tna_lec = rend_lec * (365 / dias_cartera_lec)
     
+    # --- LETAM ---
     f_vto_let = pd.to_datetime(row_let['Vencimiento']).date()
     f_em_let = pd.to_datetime(row_let['Emisión']).date()
     margen_let = row_let['Tasa']
@@ -102,25 +122,43 @@ def calcular_tamar_be(ticker_lec, ticker_let, p_lec, p_let, f_op, df_lec, df_let
     tea_target = (1 + tem_cupon_target) ** 12
     tasa_comb_target = ((tea_target ** (32 / 365)) - 1) * (365 / 32)
     
-    f_inicio_desf = f_em_let - timedelta(days=14)
-    df_dev = df_tamar[(df_tamar['Fecha'] >= f_inicio_desf) & (df_tamar['Fecha'] <= f_op)]
+    # --- FIXING TAMAR: REZAGO DE 10 DÍAS HÁBILES ---
+    f_inicio_fixing = restar_dias_habiles(f_em_let, 10, feriados)
+    f_fin_fixing = restar_dias_habiles(f_vto_let, 10, feriados)
+    
+    # Determinamos el corte de lo devengado conocido hasta hoy
+    f_corte_dev = min(f_op, f_fin_fixing)
+    
+    df_dev = df_tamar[(df_tamar['Fecha'] >= f_inicio_fixing) & (df_tamar['Fecha'] <= f_corte_dev)]
     
     if not df_dev.empty:
         dev_tna = df_dev['Tamar'].mean() / 100.0
         n_dev = len(df_dev)
     else:
-        dev_tna = 0.2413
+        dev_tna = 0.2413 # O fallback inicial
         n_dev = 0
         
-    n_proy = max(1, 250 - n_dev)
-    tamar_be = (tasa_comb_target - margen_let - (n_dev / 250.0) * dev_tna) / (n_proy / 250.0)
-    
+    # Calculamos días hábiles a proyectar
+    if f_op < f_fin_fixing:
+        n_proy = contar_dias_habiles(f_corte_dev, f_fin_fixing, feriados)
+    else:
+        n_proy = 0  # Ya cerró el fixing, la Letam opera 100% como tasa fija
+        
+    # Despeje de la Break-Even futura
+    if n_proy > 0:
+        tamar_be = (tasa_comb_target - margen_let - (n_dev / 250.0) * dev_tna) / (n_proy / 250.0)
+    else:
+        tamar_be = 0.0
+        
     df_hist_mercado = df_tamar[df_tamar['Fecha'] <= f_op]
     tamar_mercado = df_hist_mercado['Tamar'].iloc[-1] / 100.0 if not df_hist_mercado.empty else dev_tna
+    
+    spread = (tamar_mercado - tamar_be) * 100 if n_proy > 0 else 0.0
         
     return {
         'fecha': f_op, 'tir_lec': tir_lec, 'tna_lec': tna_lec, 'vpv_objetivo': vpv_objetivo, 
-        'tamar_be': tamar_be, 'tamar_mercado': tamar_mercado, 'spread_pkt': (tamar_mercado - tamar_be) * 100
+        'tamar_be': tamar_be, 'tamar_mercado': tamar_mercado, 'spread_pkt': spread,
+        'es_fija': n_proy == 0
     }
 
 # =========================================================
@@ -173,12 +211,17 @@ res_sim = calcular_tamar_be(lecap_elegida, letam_elegida, precio_lecap_sim, prec
 col1, col2, col3 = st.columns(3)
 col1.metric(label=f"TNA {lecap_elegida} (Fija)", value=f"{res_sim['tna_lec']*100:.2f}%")
 col2.metric(label=f"VPV Req {letam_elegida} (Var)", value=f"${res_sim['vpv_objetivo']:.2f}")
-col3.metric(label="Spread TAMAR BE vs Mkt", value=f"{res_sim['spread_pkt']:+.2f} pkt")
 
-st.markdown("---")
-col_a, col_b = st.columns(2)
-col_a.info(f"**TAMAR Break-Even Futura:** {res_sim['tamar_be']*100:.2f}%")
-col_b.info(f"**TAMAR Mercado Hoy:** {res_sim['tamar_mercado']*100:.2f}%")
+if res_sim['es_fija']:
+    col3.metric(label="Spread TAMAR BE vs Mkt", value="Ya es Fija")
+    st.markdown("---")
+    st.info("⚠️ **El período de fixing finalizó:** La Letam se encuentra dentro de los 10 días hábiles previos al vencimiento. Ya devengó la totalidad de la TAMAR y ahora opera como un instrumento a Tasa Fija, por lo que no corresponde calcular una Break-Even futura.")
+else:
+    col3.metric(label="Spread TAMAR BE vs Mkt", value=f"{res_sim['spread_pkt']:+.2f} pkt")
+    st.markdown("---")
+    col_a, col_b = st.columns(2)
+    col_a.info(f"**TAMAR Break-Even Futura:** {res_sim['tamar_be']*100:.2f}%")
+    col_b.info(f"**TAMAR Mercado Hoy:** {res_sim['tamar_mercado']*100:.2f}%")
 
 # Filtrado de Precios para la Histórica
 df_precios_filtrado = df_precios[(df_precios['Fecha_dt'] >= f_desde) & (df_precios['Fecha_dt'] <= f_hasta)]
@@ -198,45 +241,50 @@ df_hist = pd.DataFrame(historico)
 st.subheader("📈 Evolución Histórica: BE vs Mercado")
 
 if not df_hist.empty:
-    df_hist_plot = df_hist.copy()
-    df_hist_plot['be_pct'] = df_hist_plot['tamar_be'] * 100
-    df_hist_plot['mkt_pct'] = df_hist_plot['tamar_mercado'] * 100
+    # Filtramos del gráfico los días donde ya cerró el fixing, para que la línea no caiga a 0% arruinando el eje Y.
+    df_hist_plot = df_hist[~df_hist['es_fija']].copy()
+    
+    if not df_hist_plot.empty:
+        df_hist_plot['be_pct'] = df_hist_plot['tamar_be'] * 100
+        df_hist_plot['mkt_pct'] = df_hist_plot['tamar_mercado'] * 100
 
-    fig = go.Figure()
+        fig = go.Figure()
 
-    fig.add_trace(go.Scatter(
-        x=df_hist_plot['fecha'],
-        y=df_hist_plot['be_pct'],
-        mode='lines',
-        name=f'TAMAR BE ({lecap_elegida} vs {letam_elegida})',
-        line=dict(color='#d62728', width=2.5),
-        hovertemplate='<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>TAMAR BE:</b> %{y:.2f}%<extra></extra>'
-    ))
+        fig.add_trace(go.Scatter(
+            x=df_hist_plot['fecha'],
+            y=df_hist_plot['be_pct'],
+            mode='lines',
+            name=f'TAMAR BE ({lecap_elegida} vs {letam_elegida})',
+            line=dict(color='#d62728', width=2.5),
+            hovertemplate='<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>TAMAR BE:</b> %{y:.2f}%<extra></extra>'
+        ))
 
-    fig.add_trace(go.Scatter(
-        x=df_hist_plot['fecha'],
-        y=df_hist_plot['mkt_pct'],
-        mode='lines',
-        name='TAMAR Mkt Real',
-        line=dict(color='#1f77b4', width=2.5, dash='dash'),
-        hovertemplate='<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>TAMAR Mkt Real:</b> %{y:.2f}%<extra></extra>'
-    ))
+        fig.add_trace(go.Scatter(
+            x=df_hist_plot['fecha'],
+            y=df_hist_plot['mkt_pct'],
+            mode='lines',
+            name='TAMAR Mkt Real',
+            line=dict(color='#1f77b4', width=2.5, dash='dash'),
+            hovertemplate='<b>Fecha:</b> %{x|%d/%m/%Y}<br><b>TAMAR Mkt Real:</b> %{y:.2f}%<extra></extra>'
+        ))
 
-    fig.update_layout(
-        hovermode='x unified',
-        yaxis_title='TNA (%)',
-        template='plotly_white',
-        height=450,
-        margin=dict(l=10, r=10, t=30, b=10),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
+        fig.update_layout(
+            hovermode='x unified',
+            yaxis_title='TNA (%)',
+            template='plotly_white',
+            height=450,
+            margin=dict(l=10, r=10, t=30, b=10),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            )
         )
-    )
 
-    st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("⚠️ Todos los datos en este rango de fechas corresponden al período donde la Letam ya operaba como tasa fija (cierre de fixing).")
 else:
     st.warning("No hay datos en el rango de fechas seleccionado.")
