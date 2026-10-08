@@ -89,76 +89,87 @@ def calcular_tamar_be(ticker_lec, ticker_let, p_lec, p_let, f_op, df_lec, df_let
     row_let = df_let[df_let['Ticker'] == ticker_let].iloc[0]
     f_liq = calcular_fecha_liq(f_op, plazo_t, feriados)
     
-    # --- LECAP ---
+    # =================================================================
+    # A. LECAP / BONCAP (TASA FIJA)
+    # =================================================================
     f_vto_lec = pd.to_datetime(row_lec['Vencimiento']).date()
     f_em_lec = pd.to_datetime(row_lec['Emisión']).date()
-    tem_lec = row_lec['Tasa']
+    tem_lec_emision = row_lec['Tasa']
     d360_lec = dias360_excel(f_em_lec, f_vto_lec)
     
+    # VPV de la Lecap
     if 'VPV' in row_lec and pd.notnull(row_lec['VPV']):
         vpv_lec = float(row_lec['VPV'])
     else:
-        vpv_lec = 100.0 * ((1 + tem_lec) ** (d360_lec / 30.0))
+        vpv_lec = 100.0 * ((1 + tem_lec_emision) ** (d360_lec / 30.0))
         if ticker_lec == 'S29E7': vpv_lec = 111.6660
             
     f_cobro_lec = proximo_habil(f_vto_lec, feriados)
     dias_cartera_lec = (f_cobro_lec - f_liq).days
-    rend_lec = (vpv_lec / p_lec) - 1
-    tir_lec = ((1 + rend_lec) ** (365 / dias_cartera_lec)) - 1
-    tna_lec = rend_lec * (365 / dias_cartera_lec)
     
-    # --- LETAM ---
+    # Rendimiento y TIR de la Lecap
+    rend_lec = (vpv_lec / p_lec) - 1
+    tir_lec = ((1 + rend_lec) ** (365.0 / dias_cartera_lec)) - 1
+    tna_lec = rend_lec * (365.0 / dias_cartera_lec)
+    
+    # =================================================================
+    # B. LETAM (TASA VARIABLE) - VPV OBJETIVO
+    # =================================================================
     f_vto_let = pd.to_datetime(row_let['Vencimiento']).date()
     f_em_let = pd.to_datetime(row_let['Emisión']).date()
     margen_let = row_let['Tasa']
-    d360_let = dias360_excel(f_em_let, f_vto_let)
-    t_meses_let = (d360_let / 360) * 12
     f_cobro_let = proximo_habil(f_vto_let, feriados)
-    
     dias_cartera_let = (f_cobro_let - f_liq).days
-    vpv_objetivo = p_let * ((1 + tir_lec) ** (dias_cartera_let / 365))
     
-    tem_cupon_target = ((vpv_objetivo / 100.0) ** (1.0 / t_meses_let)) - 1
-    tea_target = (1 + tem_cupon_target) ** 12
-    tasa_comb_target = ((tea_target ** (32 / 365)) - 1) * (365 / 32)
+    # VPV que necesita la Letam para empatarle a la TIR de la Lecap
+    vpv_objetivo = p_let * ((1 + tir_lec) ** (dias_cartera_let / 365.0))
     
-    # --- FIXING TAMAR: REZAGO DE 10 DÍAS HÁBILES ---
+    # =================================================================
+    # C. FIXING Y VALOR TÉCNICO (VTC) ACUMULADO
+    # =================================================================
+    # Lag de 10 días hábiles
     f_inicio_fixing = restar_dias_habiles(f_em_let, 10, feriados)
     f_fin_fixing = restar_dias_habiles(f_vto_let, 10, feriados)
-    
-    # Determinamos el corte de lo devengado conocido hasta hoy
     f_corte_dev = min(f_op, f_fin_fixing)
     
+    # Promedio TAMAR ya devengada (conocida)
     df_dev = df_tamar[(df_tamar['Fecha'] >= f_inicio_fixing) & (df_tamar['Fecha'] <= f_corte_dev)]
-    
     if not df_dev.empty:
         dev_tna = df_dev['Tamar'].mean() / 100.0
-        n_dev = len(df_dev)
     else:
-        dev_tna = 0.2413 # O fallback inicial
-        n_dev = 0
+        dev_tna = 0.2413 # Fallback de tasa referencial si no hay datos
         
-    # Calculamos días hábiles a proyectar
+    # Calcular cuánto capitalizó la Letam desde la emisión hasta hoy (Valor Técnico)
+    d360_pasados = max(0, dias360_excel(f_em_let, f_liq))
+    tna_pasada = dev_tna + margen_let
+    tem_pasada = tna_pasada * (30.0 / 365.0)
+    vtc_hoy = 100.0 * ((1 + tem_pasada) ** (d360_pasados / 30.0))
+    
+    # =================================================================
+    # D. DESPEJE DE LA TAMAR BREAK-EVEN FUTURA
+    # =================================================================
+    d360_restante = max(1, dias360_excel(f_liq, f_vto_let))
+    
     if f_op < f_fin_fixing:
-        n_proy = contar_dias_habiles(f_corte_dev, f_fin_fixing, feriados)
-    else:
-        n_proy = 0  # Ya cerró el fixing, la Letam opera 100% como tasa fija
+        # Qué TEM futura necesito desde el VTC hoy hasta el VPV objetivo
+        tem_futura_req = ((vpv_objetivo / vtc_hoy) ** (30.0 / d360_restante)) - 1
         
-    # Despeje de la Break-Even futura
-    if n_proy > 0:
-        tamar_be = (tasa_comb_target - margen_let - (n_dev / 250.0) * dev_tna) / (n_proy / 250.0)
+        # Despejo la TAMAR (TNA) de esa TEM, restándole el margen de la Letam
+        tamar_be = (tem_futura_req * (365.0 / 30.0)) - margen_let
     else:
-        tamar_be = 0.0
+        # Entró en los últimos 10 días hábiles, es tasa fija.
+        tamar_be = 0.0 
         
+    # TAMAR Mercado Hoy para comparar
     df_hist_mercado = df_tamar[df_tamar['Fecha'] <= f_op]
     tamar_mercado = df_hist_mercado['Tamar'].iloc[-1] / 100.0 if not df_hist_mercado.empty else dev_tna
     
-    spread = (tamar_mercado - tamar_be) * 100 if n_proy > 0 else 0.0
+    spread = (tamar_mercado - tamar_be) * 100 if (f_op < f_fin_fixing) else 0.0
         
     return {
         'fecha': f_op, 'tir_lec': tir_lec, 'tna_lec': tna_lec, 'vpv_objetivo': vpv_objetivo, 
         'tamar_be': tamar_be, 'tamar_mercado': tamar_mercado, 'spread_pkt': spread,
-        'es_fija': n_proy == 0
+        'es_fija': f_op >= f_fin_fixing
     }
 
 # =========================================================
